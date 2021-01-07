@@ -1,10 +1,17 @@
-#include "fifo.hpp"
 #include "serial.hpp"
 extern "C"
 {
 #include "main.h"
 #include "stm32f1xx_ll_usart.h"
 }
+
+#include <iostream>
+#include <sstream>
+#include <vector>
+Serial serialCmd;
+
+
+
 
 Serial::Serial():
   USARTx(USART2)
@@ -27,35 +34,6 @@ Serial::Serial():
     status = OK;
     return status;
   }
-  Serial::STATUS Serial::SendData(uint8_t* buffer,uint32_t size)
-  {
-    Buffer_t item;
-    item.size = size;
-    
-    item.buffer = new uint8_t[size];
-    for(int i = 0;i < size;++i)
-    {
-     item.buffer[i] = buffer[i];
-    }
-   return SendData(item);
-  }
-  Serial::STATUS Serial::SendData(Buffer_t item)
-  {
-    STATUS status = ERROR;
-    if(!txBufferFifo.push(item))
-        return status; 
-    status = OK;
-    return status;
-  }
-  
-  USART_TypeDef* Serial::getInstance(void)
-  {
-    return USARTx;
-  }
-  
-  
-Serial serialCmd;
-
 
 /**
   * @brief  Rx Transfer completed callback
@@ -63,11 +41,24 @@ Serial serialCmd;
   *         you can add your own implementation.
   * @retval None
   */
+  
 void UART_CharReception_Callback(void)
 {
   /* Read Received character. RXNE flag is cleared by reading of DR register */  
-  uint8_t lastData = LL_USART_ReceiveData8(serialCmd.getInstance());
-  serialCmd.rxBufferFifo.push(lastData);
+  char lastData = LL_USART_ReceiveData8(serialCmd.getInstance());
+  if(lastData!= '\r')
+  {
+      serialCmd.rxStr.push_back(lastData);
+    
+      if(lastData == '\n')
+      {
+        serialCmd.setReady(true);
+        serialCmd.rxSStream << serialCmd.rxStr;
+        serialCmd.rxStr.clear();
+      }
+  }
+
+  
 }
 
 /**
@@ -76,18 +67,18 @@ void UART_CharReception_Callback(void)
   */
 void UART_TXEmpty_Callback(void)
 {
-  USART_TypeDef* USARTx = serialCmd.getInstance();
-  if(serialCmd.index == (serialCmd.txBuffer.size - 1))
-  {
-    /* Disable TXE interrupt */
-    LL_USART_DisableIT_TXE(USARTx);
-    
-    /* Enable TC interrupt */
-    LL_USART_EnableIT_TC(USARTx);
-  }
-
-  /* Fill DR with a new char */
-  LL_USART_TransmitData8(USARTx, serialCmd.txBuffer.buffer[serialCmd.index++]);
+//  USART_TypeDef* USARTx = serialCmd.getInstance();
+//  if(serialCmd.index == (serialCmd.txBuffer.size - 1))
+//  {
+//    /* Disable TXE interrupt */
+//    LL_USART_DisableIT_TXE(USARTx);
+//    
+//    /* Enable TC interrupt */
+//    LL_USART_EnableIT_TC(USARTx);
+//  }
+//
+//  /* Fill DR with a new char */
+//  LL_USART_TransmitData8(USARTx, serialCmd.txBuffer.buffer[serialCmd.index++]);
 }
 
 /**
@@ -97,28 +88,28 @@ void UART_TXEmpty_Callback(void)
 void UART_CharTransmitComplete_Callback(void)
 {
   USART_TypeDef* USARTx = serialCmd.getInstance();
-  if(serialCmd.index == serialCmd.txBuffer.size)
-  {
-    serialCmd.index = 0;
-    delete serialCmd.txBuffer.buffer;
-    serialCmd.txBuffer.buffer = NULL;
-    if(serialCmd.txBufferFifo.isEmpty())
-    {
-    /* Disable TC interrupt */
-    LL_USART_DisableIT_TC(USARTx);
-    
-    }
-    else
-    {
-      
-      serialCmd.txBufferFifo.pop(serialCmd.txBuffer);
-      /* Fill DR with a new char */
-      if(serialCmd.txBuffer.size != 0)
-      {
-        LL_USART_TransmitData8(USARTx, serialCmd.txBuffer.buffer[serialCmd.index++]);
-      }
-    }
-  }
+//  if(serialCmd.index == serialCmd.txBuffer.size)
+//  {
+//    serialCmd.index = 0;
+//    delete serialCmd.txBuffer.buffer;
+//    serialCmd.txBuffer.buffer = NULL;
+//    if(serialCmd.txBufferFifo.isEmpty())
+//    {
+//    /* Disable TC interrupt */
+//    LL_USART_DisableIT_TC(USARTx);
+//    
+//    }
+//    else
+//    {
+//      
+//      serialCmd.txBufferFifo.pop(serialCmd.txBuffer);
+//      /* Fill DR with a new char */
+//      if(serialCmd.txBuffer.size != 0)
+//      {
+//        LL_USART_TransmitData8(USARTx, serialCmd.txBuffer.buffer[serialCmd.index++]);
+//      }
+//    }
+//  }
 }
 
 /**
@@ -189,28 +180,42 @@ void SerialInit(void)
   serialCmd.StartReception();
 }
 
+
+
+string line,word;
+typedef struct 
+{
+  string cmd;
+  vector<string> args;
+}Cmd_t;
+
+vector<Cmd_t> cmds;
 void SerialProcess(void)
 {
-  if(!serialCmd.rxBufferFifo.isEmpty())
+  //TODO: getline 读到换行，文档结束，无内容可读时会结束.
+  static uint32_t startTick = 0;
+  if((HAL_GetTick() - startTick) > 1000)
   {
-    char data;
-    serialCmd.rxBufferFifo.pop((uint8_t&)data);
-    static std::string rxString;
-    if(data!='\n')
+    startTick = HAL_GetTick();
+    if(serialCmd.ready())
     {
-      rxString.push_back(data);
-    }
-    else
-    {
-      serialCmd.rxList.push_back(rxString);
-      rxString.erase();
+      while(getline(serialCmd.rxSStream, line))
+      {
+        if(!line.empty())
+        {
+          Cmd_t cmd;
+          istringstream record(line);
+          record >> cmd.cmd;
+          while(record >> word)
+          {
+            cmd.args.push_back(word);
+          }
+          cmds.push_back(cmd);
+        }
+        
+      }
+      serialCmd.rxSStream.clear();
+      serialCmd.setReady(false);
     }
   }
-  if(!serialCmd.rxList.empty())
-  {
-    std::string str = serialCmd.rxList.front();
-    serialCmd.rxList.pop_front();
-    str.
-  }
-
 }
